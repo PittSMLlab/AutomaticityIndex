@@ -1,8 +1,112 @@
-function [subjectID, hboData, hbrData, scaledData, responders, perfDataArray, deltaPerf, deltaPerfGaitOrCog, scaleFactors, missingDataMask]=computeAutomaticityIndex(perfDataPath, pfcDataPath, studyID, visitNum, saveResAndFigure, saveDir, scaleMethod, logData, plotNormalizeDiff)
+function [subjectID, hboData, hbrData, scaledData, responders, perfDataArray, deltaPerf, deltaPerfGaitOrCog, scaleFactors, missingDataMask]=computeAutomaticityIndex(perfDataPath, pfcDataPath, studyID, visitNum, saveResAndFigure, saveDir, scaleMethod, logData, plotNormalizeDiff, sortedDtNames, sortedCondNamesInInputFile)
 % (perfDataPath, pfcDataPath, studyID, visitNum, saveResAndFigure, saveDir, scaleMethod, logData, plotNormalizeDiff)
-if nargin < 3 || isempty(visitNum) || isnan(visitNum)
+% Compute automaticity index (PUBLISHED), any update should check that
+% published results remain reproducible
+% 
+% [OUTPUTARGS]
+%   - subjectID: cell array of integers representing mergeID, in size
+%               subjext x1
+%   - hboData: 2D matrix of double representing raw Hbo activation in subjects x 4 (raw Hbo of single task
+%           gait, single task cog, easy DT, hard DT)
+%   - hbrData: 2D matrix of double representing raw Hbr activation in 
+%           subjects x 4 (raw Hbo of single task gait, single task cog, easy DT, hard DT)
+%   - scaledData: 3 x 4 cell array, 1st row is a header, 2nd row is data,
+%           3rd row is the column name in the data. 1st column=AGI Hbo, 2nd
+%           column = AGI Hbr. Inside row2, each data is subject x4 double
+%           matrix where the 4 columns are unscaled Hbo/Hbr for single task
+%           gait, cog, then scaled/AGI for easy and hard DT
+%   - responders: 2x1 cell where each cell is logical array of what
+%       subjects are responders, 1st cell for hbo and 2nd cell for Hbr. 
+%       responders are indiviudals whose scaled AGI increase as task is
+%       harder.
+%   - perfDataArray: subjects x 6 double matrix, columns are in order:
+%           gait speed in single task motor, cog perf in single cog task, 
+%           easyDT gait speed, cog perf, hardDT motor perf, cog perf
+%   - deltaPerf: subjects x 4 double matrix, first 2 columns are always 0,
+%           combined performance change from ST to DT (normalized by ST) in
+%           column order: 0,0,easyDT, hardDT
+%   - deltaPerfGaitOrCog: subjects x4 double matrix, columns are in order:
+%           normalized gait speed change from ST to DT in easyDT, then hard
+%           DT, normalized cog perf change from ST to DT ineasy DT, hardDT
+%   - scaleFactors:  scalar, scale factor (will only save the last computed
+%           scale factor, typically this will be factor for hbr)
+%           %TODO/FIXME: save both.
+%   - missingDataMask: subjects x 1 logical array, 1s represent
+%           participants with missing performance data (ID present in the table but
+%           data is missing/blank in csv)
+% 
+% [INPUTARGS]
+%   - perfDataPath: string of absolute path to load the performance data. This is the performance
+%           data averaged across all trials, so only 1 data point per
+%           subject per condition.
+%           Expect an excel file, typically csv. 1st row is column header, rest each
+%           row is 1 participant/1visit/1task. 
+%           Expected to contain column headers: Cohort, Visit, MergeID, Cohort, cond, GaitSpeed_mps,
+%           RCRT. Corresponding to studyID, visit number (integer) or in
+%           format 'Visit 1' (have to be exactly this, cap V and space btw
+%           t and number, MergeID (subjectID that can be used across
+%           studies, here has to be a number format, this is used to match PFC and performance data
+%           TODO: this should be fixed to make it more flexible)
+%           cond: task condition names, GaitSpeed_mps: avg gait speed for
+%           the whole visit. RCRT: rate of correct letter generated for the
+%           whole session.
+%           TODO: this should be updated to not always expect RCRT, rather
+%           any generic cogPerfName
+%           TODO: it's better if this function expects arrays of PFC and
+%           perf inputs instead so that users can clean up, store and the perf and PFC the data however
+%           they wish.
+%           Also expect task names in the cond column to match EXACTLY what
+%           you provide in the sortedCondNamesInInputFile or by default 
+%           expecting cond names to include: {'Even','Standing_ABC','Even_ABC','Uneven_ABC'}
+%   - pfcDataPath: string of absolute path to load the PFC data. This is imaging data
+%           averaged for the whole ROI and across trials, typically the
+%           whole PFC. 
+%           Expecting 1 number per ROI per task per subject per
+%           Hb species (1 for Hbo, 1 for Hbr). Expecting ot have columns
+%           headers: Cohort, Visit, ROI, type, cond, tstat, MergeID
+%           Expecting a csv file
+%           Expecting task name in cond column to match EXACTLY what
+%           you provide in the sortedCondNamesInInputFile or by default 
+%           expecting cond names to include: {'Even','Standing_ABC','Even_ABC','Uneven_ABC'}
+%   - studyID: cell array of study IDs to compute AGI for, will look for
+%           matches in the Cohort column in PFC and Perf
+%   - visitNum: Integer of visit number. OPTIONAL, default 1.
+%   - saveResAndFigure: boolean of whether or not to save results.
+%           OPTIONAL, default false
+%   - saveDir: string of directory to save the figures and results.
+%           OPTIONAL, no default, HAVE TO be provided when saveResAndFigure
+%           is true
+%   - scaleMethod: string of how to scale the index, allowed values:
+%           'Linear; or 'Exp'. OPTIONA. default 'Exp'
+%   - logData: boolean of whether or not to log the y-axis for the index
+%           and PFC. OPTIONAL. default false
+%   - plotNormalizeDiff: boolean of whether or not to plot difference in
+%           normalized format or just raw difference. This doesn't impact
+%           calculation, just visualization. Calculation of index always uses normalized difference. 
+%           OPTIONAL. default false.
+%   - sortedDtNames: a cell array of DT names sorted from easy to hard task.
+%           OPTIONAL. Can provide {} or [] if want to use default task names.
+%           Default {'evenABC', 'unevenABC'} 
+%   - sortedCondNamesInInputFile: a cell array of task condition names in order {singleMotor, singleCog, easyDT, hardDT}
+%           OPTIONAL. Can provide {} or [] if want to use default.
+%           Default: {'Even','Standing_ABC','Even_ABC','Uneven_ABC'}
+% Examples: 
+% 
+% Provide sample usage code here
+% 
+% See also: List related files here
+
+% $Author: Shuqi Liu $	$Date: 2025/04/14 16:12:26 $	$Revision: 0.1 $
+% Copyright: Sensorimotor Learning Laboratory 2025
+
+if nargin < 4 || isempty(visitNum) || all(isnan(visitNum))
     visitNum = 1; %Default visit 1.
 end
+
+if nargin <= 4
+    saveResAndFigure = false; %default to false if not provided.
+end
+
 % default scaleMethod = 'Exp', this arg has to use keywords exactly as Exp
 % or Linear
 if nargin <= 6 || isempty(scaleMethod) || any(isnan(scaleMethod))
@@ -19,6 +123,22 @@ if nargin <= 8 || isempty(plotNormalizeDiff) || any(isnan(plotNormalizeDiff))
     %calculation of index always used normalized data perf
 end
 
+if nargin <= 9 || isempty(sortedDtNames)
+    sortedDtNames = {'evenABC','unevenABC'}; %default from easy to hard
+end
+
+if nargin <= 10 || isempty(sortedCondNamesInInputFile)
+    stGaitCondName = 'Even';
+    stCogCondName = 'Standing_ABC';
+    easyDTCondName = 'Even_ABC';
+    hardDTCondName = 'Uneven_ABC';
+else
+    stGaitCondName = sortedCondNamesInInputFile{1}; %default stmotor, stalpha, to easyDT, hardDT
+    stCogCondName = sortedCondNamesInInputFile{2};
+    easyDTCondName = sortedCondNamesInInputFile{3};
+    hardDTCondName = sortedCondNamesInInputFile{4};
+end
+
 %% load perf data
 % perfData = readcell('/Users/mac/Library/CloudStorage/OneDrive-SharedLibraries-UniversityofPittsburgh/BEAM lab - fNIRS Workgroup/Rosso_fNIRS_code/Matlab/Emma_SampleDataNMCM_forShuqi/NMCM_PRIMA_MOVE_combined_wide_19Nov2021.csv');
 % /Users/mac/Library/CloudStorage/OneDrive-UniversityofPittsburgh/SML/Projects/fNIR Project/Code_NIRS_Automaticity/Data/EmmaDataset/PRIMA_051722
@@ -31,8 +151,26 @@ perfDataHeader = perfData(1,:);
 studyIdCol = find(strcmp(perfDataHeader,'Cohort'));
 perfDataFull = perfData(contains(perfData(:,studyIdCol),studyID),:);
 visitCol = strcmp(perfDataHeader,'Visit');
-perfDataFull = perfDataFull(strcmp(perfDataFull(:,visitCol),['Visit ' num2str(visitNum)]) |...
-    any(cell2mat(perfDataFull(:,visitCol)) == visitNum,2),:);
+if length(visitNum) == 1 %single visit
+    %handle visit column to contain data as 1,2,3 (number directly), or
+    %"Visit 1" (string format)
+    perfDataFull = perfDataFull(strcmp(perfDataFull(:,visitCol),['Visit ' num2str(visitNum)]) |...
+        any(cell2mat(perfDataFull(:,visitCol)) == visitNum,2),:);
+    %FIXME: this is the same as cell2mat(perfDataFull(:,visitCol))) == visitNum, not
+    %sure why I ahd to do the any
+else
+    %the ismember requires both args to have the same type. So first take a
+    %guess of what the type visit will be
+    if isnumeric(cell2mat(perfDataFull(1,visitCol)))
+        perfDataFull = perfDataFull(ismember(cell2mat(perfDataFull(:,visitCol)),visitNum),:);
+    else
+        visitNumStr = cell(1,length(visitNum));
+        for i = 1:length(visitNum)
+            visitNumStr{i} = ['Visit ' num2str(visitNum(i))];
+        end
+        perfDataFull = perfDataFull(ismember(perfDataFull(:,visitCol),visitNumStr),:);
+    end
+end
 
 %in order: ID (numerical version, 10xxx, 2xxx, 21xxx, study, task, surface, gait, alphabet
 %the provided array are in order of the data header, so the indexed sub
@@ -41,19 +179,19 @@ relevantCols = ismember(perfDataHeader,{'MergeID','Cohort','cond','GaitSpeed_mps
 perfData = perfDataFull(:,relevantCols); %the perfData now will contain the 5 columns above in the same order listed above.
 % load old data 19Nov2021
 % perfData = perfDataFull(:,[1:4,gaitSpeedIdx , alphabetIdx]);
-%the index here is the sub column (following order in line 44.
+%the index here is the sub column (following order in line 109.
 gaitSpeedCol = 4; alphabetCol = 5; condCol = 3; idCol = 1; 
-walkData = perfData(strcmp(perfData(:,condCol),'Even'),:);
-walk2Data = perfData(strcmp(perfData(:,condCol),'Even_ABC'),:);
-s2Data = perfData(strcmp(perfData(:,condCol),'Standing_ABC'),:);
-walkUneven2Data = perfData(strcmp(perfData(:,condCol),'Uneven_ABC'),:);
-checkID = isequal(walkData(:,idCol),walk2Data(:,idCol),s2Data(:,idCol),walkUneven2Data(:,idCol));
+walkData = perfData(strcmp(perfData(:,condCol),stGaitCondName),:);
+easyDTData = perfData(strcmp(perfData(:,condCol),easyDTCondName),:);
+singleCogTaskData = perfData(strcmp(perfData(:,condCol),stCogCondName),:);
+hardDTData = perfData(strcmp(perfData(:,condCol),hardDTCondName),:);
+checkID = isequal(walkData(:,idCol),easyDTData(:,idCol),singleCogTaskData(:,idCol),hardDTData(:,idCol));
 if ~checkID
     warning('Gait and cognitive performance data ID did NOT match.')
 end
 
 %Remove missing data (PRIMA 2 subject gait speed missing, remove this person for all)
-missingDataMask = cellfun(@ismissing, [walkData(:,gaitSpeedCol),walk2Data(:,[alphabetCol,gaitSpeedCol]),s2Data(:,alphabetCol),walkUneven2Data(:,[alphabetCol,gaitSpeedCol])]);
+missingDataMask = cellfun(@ismissing, [walkData(:,gaitSpeedCol),easyDTData(:,[alphabetCol,gaitSpeedCol]),singleCogTaskData(:,alphabetCol),hardDTData(:,[alphabetCol,gaitSpeedCol])]);
 missingDataMask = any(missingDataMask,2);
 missingID = walkData(missingDataMask,idCol) %number version: 10XXX for NMCM, 21xxx for PRIMA and 30xxx for MHT
 %previously missing 21180, 21282 PRIMA. but value exists in 01272023Data
@@ -63,15 +201,19 @@ missingID = walkData(missingDataMask,idCol) %number version: 10XXX for NMCM, 21x
 %     missingID{mIdx} = [num2str(mid-20000) 'NIRS'];
 % end
 walkData(missingDataMask,:) = [];
-walk2Data(missingDataMask,:) = [];
-walkUneven2Data(missingDataMask,:) = [];
-s2Data(missingDataMask,:) = [];
+easyDTData(missingDataMask,:) = [];
+hardDTData(missingDataMask,:) = [];
+singleCogTaskData(missingDataMask,:) = [];
 
 subjectID = walkData(:,1);
 
 subjectID = cellstr(num2str(cell2mat(subjectID))); 
-perfDataArray = cell2mat([walkData(:,gaitSpeedCol),s2Data(:,alphabetCol),walk2Data(:,[gaitSpeedCol,alphabetCol]),walkUneven2Data(:,[gaitSpeedCol,alphabetCol])]);
+perfDataArray = cell2mat([walkData(:,gaitSpeedCol),singleCogTaskData(:,alphabetCol),easyDTData(:,[gaitSpeedCol,alphabetCol]),hardDTData(:,[gaitSpeedCol,alphabetCol])]);
 
+%check unique ID
+if ~isequal(subjectID,unique(subjectID,'stable'))
+    error('Subject ID in performance not unique. Some repeat values found. Fix this.')
+end
 
 %% load PFC data
 % pfcData = readcell('/Users/mac/Library/CloudStorage/OneDrive-SharedLibraries-UniversityofPittsburgh/BEAM lab - fNIRS Workgroup/Rosso_fNIRS_code/Matlab/Emma_SampleDataNMCM_forShuqi/SubjStats_ROIw_PFC.csv');
@@ -110,8 +252,26 @@ end
 
 %sub select session 1 only and whole PFC only.
 visitCol = strcmp(pfcDataHeader,'Visit');
-pfcData = pfcData(strcmp(pfcData(:,visitCol),['Visit ' num2str(visitNum)]) |...
-    any(cell2mat(pfcData(:,visitCol)) == visitNum,2),:);
+if length(visitNum) == 1 %single visit
+    %handle visit column to contain data as 1,2,3 (number directly), or
+    %"Visit 1" (string format)
+    pfcData = pfcData(strcmp(pfcData(:,visitCol),['Visit ' num2str(visitNum)]) |...
+        any(cell2mat(pfcData(:,visitCol)) == visitNum,2),:);
+    %FIXME: this is the same as cell2mat(perfDataFull(:,visitCol))) == visitNum, not
+    %sure why I ahd to do the any
+else
+    %the ismember requires both args to have the same type. So first take a
+    %guess of what the type visit will be
+    if isnumeric(cell2mat(pfcData(1,visitCol)))
+        pfcData = pfcData(ismember(cell2mat(pfcData(:,visitCol)),visitNum),:);
+    else
+        visitNumStr = cell(1,length(visitNum));
+        for i = 1:length(visitNum)
+            visitNumStr{i} = ['Visit ' num2str(visitNum(i))];
+        end
+        pfcData = pfcData(ismember(pfcData(:,visitCol),visitNumStr),:);
+    end
+end
 
 roiCol = find(strcmp(pfcDataHeader,'ROI'));
 pfcData = pfcData(strcmp(pfcData(:,roiCol),'PFC'),:); %select whole brain PFC result only.
@@ -128,15 +288,15 @@ idCol = find(strcmp(pfcDataHeader,'MergeID'));
 pfcData(ismember(cell2mat(pfcData(:,idCol)),cell2mat(missingID)),:)=[]; %remove rows for the person with missing data.
 
 %check if pfc and perf data match.
-walkData = pfcData(strcmp(pfcData(:,taskCol),'Even'),:);
-s2Data = pfcData(strcmp(pfcData(:,taskCol),'Standing_ABC'),:);
-walk2Data = pfcData(strcmp(pfcData(:,taskCol),'Even_ABC'),:);
-walkUneven2Data = pfcData(strcmp(pfcData(:,taskCol),'Uneven_ABC'),:);
-checkID = isequal(walkData(:,idCol),walk2Data(:,idCol),s2Data(:,idCol),walkUneven2Data(:,idCol));
+walkData = pfcData(strcmp(pfcData(:,taskCol),stGaitCondName),:);
+singleCogTaskData = pfcData(strcmp(pfcData(:,taskCol),stCogCondName),:);
+easyDTData = pfcData(strcmp(pfcData(:,taskCol),easyDTCondName),:);
+hardDTData = pfcData(strcmp(pfcData(:,taskCol),hardDTCondName),:);
+checkID = isequal(walkData(:,idCol),easyDTData(:,idCol),singleCogTaskData(:,idCol),hardDTData(:,idCol));
 if ~checkID
     warning('ID of PFC data did NOT match');
 end
-checkType = isequal(walkData(:,typeCol),walk2Data(:,typeCol),s2Data(:,typeCol),walkUneven2Data(:,typeCol));
+checkType = isequal(walkData(:,typeCol),easyDTData(:,typeCol),singleCogTaskData(:,typeCol),hardDTData(:,typeCol));
 if ~checkType
     warning('ID of data type hbo/hbr did NOT match');
 end
@@ -145,10 +305,25 @@ checkID = [];
 % mergeIdCol = find(strcmp(pfcDataHeader,'MergeID'));
 
 %remove subjects with misssing PFC or performance data.
-%find missing PFC data, subjectID comes from performance
+%find missing PFC data, subjectID comes from performance. This returns
+%values in subjectID but not in walkData (in perf but not in PFC)
 [diffId, idxPerf] = setdiff(str2num(cell2mat(subjectID)),cell2mat(walkData(1:2:end,idCol)))
+warning('Removing subject that has performance data only but not PFC. Removing diffId printed above.')
 perfDataArray(idxPerf,:)=[]; %remove entry that has performance but not PFC.
 subjectID(idxPerf)=[];
+
+%set diff doesn't get repeat index out, returns the first index of the
+%different elements.
+[diffId, idxPerf] = setdiff(cell2mat(walkData(1:2:end,idCol)),str2num(cell2mat(subjectID)))
+if ~isempty(diffId) 
+    warning('Removing subject that has PFC data only but no performance. Removing diffId printed above.')
+    warning('Implementation unstable if the PFC data is not in order of Hbo then Hbr per subject,then next subject, e.g., (Subject1Hbo, subject1Hbr, sub2Hbo, sub2Hbr, etc.)')
+    %TODO: this only works if the hbo/hbr is always in order. Can
+    walkData([idxPerf,idxPerf+1],:)=[]; %PFC entries have repeats, 1 for hbo and 1 for Hbr, they are in order. so remove both entries
+    singleCogTaskData([idxPerf,idxPerf+1],:)=[];
+    easyDTData([idxPerf,idxPerf+1],:)=[]; %remove entry that has PFC but no performance.
+    hardDTData([idxPerf,idxPerf+1],:)=[];
+end
 % %TODO: do this for things in PFC but not in performance; and this is
 % probably better than the for loop to check for IDs&if there is also
 % gaurantee of same ordering.
@@ -156,20 +331,20 @@ subjectID(idxPerf)=[];
 for id = 1:length(subjectID)
 %     %check ID when ID is in XXXNIRS format
 %     if str2num(subjectID{id}) < 20000 %naming convension for NMCM: 10xxx in combined, or xxxNIRS where xxx is subject id
-%         checkID(end+1) = str2num(subjectID{id}) == 10000+str2num(walk2Data{id*2,idCol}(1:3));
+%         checkID(end+1) = str2num(subjectID{id}) == 10000+str2num(easyDTData{id*2,idCol}(1:3));
 %     elseif str2num(subjectID{id}) > 21000 && str2num(subjectID{id}) < 30000  %PRIMA naming convention: 2xxx in combined, or xxxxNIRS where xxxx is subject ID
-%         checkID(end+1) = str2num(subjectID{id}) == 20000+str2num(walk2Data{id*2,idCol}(1:4));
+%         checkID(end+1) = str2num(subjectID{id}) == 20000+str2num(easyDTData{id*2,idCol}(1:4));
 %     elseif str2num(subjectID{id}) >= 30000 %MMH naming convention: 30xxx in combined, and # 1-117 in combined perf data
-%         checkID(end+1) = str2num(subjectID{id}) - 30000 == str2num(walk2Data{id*2,idCol});
+%         checkID(end+1) = str2num(subjectID{id}) - 30000 == str2num(easyDTData{id*2,idCol});
 %     end
 % check ID when both IDs have the numerical format
-    checkID(end+1) = str2num(subjectID{id}) == walk2Data{id*2,idCol};
+    checkID(end+1) = str2num(subjectID{id}) == easyDTData{id*2,idCol};
 end
 if ~all(checkID)
     warning('PFC data and performance data subject ID did NOT match')
 end
 
-pfcDataTstats = [walkData(:,[typeCol,tCol]),s2Data(:,tCol),walk2Data(:,tCol),walkUneven2Data(:,tCol)];
+pfcDataTstats = [walkData(:,[typeCol,tCol]),singleCogTaskData(:,tCol),easyDTData(:,tCol),hardDTData(:,tCol)];
 %in subject x task format, task order: walkeven, s2, w2,
 %walkuneven2, 1st column list the type (Hbo or Hbr)
 
@@ -235,16 +410,20 @@ for i = 1:2 %1=hbo, 2=hbr
     increaseLogicalPerf = deltaPerf(:,4) - deltaPerf(:,3) > 0; %W2U - W2
     increaseRatioPerf = sum(increaseLogicalPerf) / size(deltaPerf,1);
 %     plot(1:2,deltaPerf(:,2:3),'o-','LineWidth',1.5,'MarkerSize',5,'Color', greyColor);%decrease group
-    plot(2:3,deltaPerf(increaseLogicalPerf,3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', greyColor);%gray (unexpected)
+    if any(increaseLogicalPerf)
+        plot(2:3,deltaPerf(increaseLogicalPerf,3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', greyColor);%gray (unexpected)
+    end
 %     ylim([-0.65 0.67]); 
     ylabel('\DeltaPerformance');
-    xticks([2, 3]); xticklabels({'evenABC','unevenABC'})
-    title(sprintf('evenABC -> unevenABC\nIncrease (unexpected): %.2f', increaseRatioPerf));
+    xticks([2, 3]); xticklabels(sortedDtNames)
+    title(sprintf('easyDT -> hardDT\nIncrease (unexpected): %.2f', increaseRatioPerf));
     
     s1=subplot(totalRow,totalSubPltCol,totalSubPltCol+1); %plot on 2nd row.
     axis square;
     hold on;
-    plot(2:3,deltaPerf(~increaseLogicalPerf,3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', blueColor);%blue (expected, non-change or decrease)
+    if any(~increaseLogicalPerf)
+        plot(2:3,deltaPerf(~increaseLogicalPerf,3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', blueColor);%blue (expected, non-change or decrease)
+    end
 %     ylim([-0.65 0.67])
 %     lineItems = findobj(s1,'Type','Line');
 %     legend(lineItems([1,end]),'Performance Decrease (Expected)','Performance Increase (Unexpected)')
@@ -256,14 +435,14 @@ for i = 1:2 %1=hbo, 2=hbr
 %     end
     xticks([2, 3])
 %     xticklabels({'Wk','S2','W2','W2Uneven'})
-    xticklabels({'evenABC','unevenABC'})
+    xticklabels(sortedDtNames)
     ylabel('\DeltaPerformance')
     % ylabel('(SpeedTask-SpeedWalk)/SpeedWalk + (AlphaTask - AlphaS2) / AlphaS2')
 
     %plot bar graph of the %subjects
 %     figure(fCounts); subplot(1,totalSubPltCol,1); hold on; 
 %     axis square;
-    title(sprintf('evenABC -> unevenABC\nDecrease (expected): %.2f', 1-increaseRatioPerf));
+    title(sprintf('easyDT -> hardDT\nDecrease (expected): %.2f', 1-increaseRatioPerf));
 %     bar(1,increaseRatio,1,'FaceColor',greyColor,'DisplayName','Unexpected (Perf Increase)');
 %     bar(2,-100+increaseRatio,1,'FaceColor',blueColor,'DisplayName','Expected (Perf Decrease)');
 %     b = bar([increaseRatio -100+increaseRatio; 55 45; 77 23],'Stacked')
@@ -287,13 +466,16 @@ for i = 1:2 %1=hbo, 2=hbr
     %%plot the difference between W2U-WU as scatter.   
     if plotNormalizeDiff%normalized version
         dataToplot = (deltaPerf(increaseLogicalPerf,4) - deltaPerf(increaseLogicalPerf,3))./abs(deltaPerf(increaseLogicalPerf,3));
-        ylabel('(unevenABC - uevenABC) / uevenABC');
+        ylabel('(hardDT - easyDT) / easyDT');
     else %%non-normalized version of the difference 
         dataToplot = deltaPerf(increaseLogicalPerf,4) - deltaPerf(increaseLogicalPerf,3);
-        ylabel('uevenABC - evenABC');
+        ylabel('hardDT - easyDT');
     end
     plot(ones(size(dataToplot)),dataToplot,'o','Color',greyColor, 'LineWidth',2,'MarkerSize',10,'DisplayName','Inc(unexp)');
-    xticks([]); grid on; xlabel('Inc(unexp)'); ylim([0 1.1*max(dataToplot)]); %ylim([0 0.5]); 
+    xticks([]); grid on; xlabel('Inc(unexp)'); 
+    if any(dataToplot) %only set lim if there is data
+        ylim([0 1.1*max(dataToplot)]); %ylim([0 0.5]); 
+    end
     title('Amount of increase')
 %     legend(); %legend('location','northeastoutside'); 
     %plot on 2nd row 2nd column (expected perf)
@@ -302,14 +484,16 @@ for i = 1:2 %1=hbo, 2=hbr
 %     xlim([0.8 1.2]); xticks([]); legend(); ylim([-0.5 0]); grid on;
     if plotNormalizeDiff%normalized version
         dataToplot = (deltaPerf(~increaseLogicalPerf,4) - deltaPerf(~increaseLogicalPerf,3))./abs(deltaPerf(~increaseLogicalPerf,3));
-        ylabel('(unevenABC - uevenABC) / uevenABC');
+        ylabel('(hardDT - easyDT) / easyDT');
     else %Non-normalized version of the difference 
         dataToplot = deltaPerf(~increaseLogicalPerf,4) - deltaPerf(~increaseLogicalPerf,3);
-        ylabel('uevenABC - evenABC'); %FIXME: this ylabel will disappear after plotting.
+        ylabel('hardDT - easyDT'); %FIXME: this ylabel will disappear after plotting.
     end
     plot(ones(size(dataToplot)),dataToplot,'o','Color',blueColor, 'LineWidth',2,'MarkerSize',10,'DisplayName','Dec(unexp)')
     xticks([]); grid on; xlabel('Dec(exp)'); 
-    ylim([1.1*min(dataToplot) 0]); %ylim([-0.5 0]); 
+    if any(dataToplot) %only set lim if there is data
+        ylim([1.1*min(dataToplot) 0]); %ylim([-0.5 0]); 
+    end
     title('Amount of decrease');
 %     legend(); %legend('location','northeastoutside'); 
     
@@ -321,15 +505,19 @@ for i = 1:2 %1=hbo, 2=hbr
     increaseLogicalPFC = dataPfcHboVsBaseInOrderShifted(:,4) - dataPfcHboVsBaseInOrderShifted(:,3) >= 0;
     increaseRatioRawPFC = sum(increaseLogicalPFC) / size(dataPfcHboVsBaseInOrderShifted,1);
 
-    plot(dataPfcHboVsBaseInOrderShifted(~increaseLogicalPFC,3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', greyColor);%decrease group
+    if any(~increaseLogicalPFC)
+        plot(dataPfcHboVsBaseInOrderShifted(~increaseLogicalPFC,3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', greyColor);%decrease group
+    end
 %     ylim([0 15]); 
     ylabel(['PFCActivation_{' titleStr '}']);
-    title(sprintf('evenABC -> unevenABC\nDecrease (unexpected): %.2f', 1-increaseRatioRawPFC));
-    xticks([1:2]); xticklabels({'evenABC','unevenABC'});
+    title(sprintf('%s -> %s\nDecrease (unexpected): %.2f',sortedDtNames{1},sortedDtNames{2}, 1-increaseRatioRawPFC));
+    xticks([1:2]); xticklabels(sortedDtNames);
 
     s1 = subplot(totalRow,totalSubPltCol,totalSubPltCol+1); %plot on row 2
     axis square; hold on;
-    plot(dataPfcHboVsBaseInOrderShifted(increaseLogicalPFC,3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', blueColor);%increase or non change group
+    if any(~increaseLogicalPFC)
+        plot(dataPfcHboVsBaseInOrderShifted(increaseLogicalPFC,3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', blueColor);%increase or non change group
+    end
 %     lineItems = findobj(s1,'Type','Line');
 %     legend(lineItems([1]),'W2<=W2U (Expected)','location','northeastoutside')
     
@@ -340,16 +528,16 @@ for i = 1:2 %1=hbo, 2=hbr
     %plot the line indicating the amount of shift.
 %     plot(1:2,repmat(shiftAmount,1,2),'k-','LineWidth',1.5,'DisplayName',['Shifted ' num2str(shiftAmount)])
 %         xlim([0.75,2.25])
-    xticks([1:2]); xticklabels({'evenABC','unevenABC'});
+    xticks([1:2]); xticklabels(sortedDtNames);
 %     ylim([0 15])
     ylabel(['PFCActivation_{' titleStr '}']);
 
-    title(sprintf('evenABC -> unevenABC\nIncrease (expected): %.2f', increaseRatioRawPFC));
+    title(sprintf('%s -> %s\nIncrease (expected): %.2f', sortedDtNames{1}, sortedDtNames{2}, increaseRatioRawPFC));
     outlierCounts = sum(isoutlier(dataPfcHboVsBaseInOrderShifted(:,3:4)));
 %     legend('NumColumns',1,'Location','northeastoutside')
     
     %plot CI and unevenABC - evenABC scatter for unscaledPFC
-    disp([titleStr 'Raw W2U-W2'])
+    disp([titleStr 'Raw ' sortedDtNames{2} '-' sortedDtNames{1}])
 %     subplot(totalRow,totalSubPltCol*2,totalSubPltCol*4+1); %plot on row 3
 %     axis square; hold on;
 %plot full CI of the whole group.
@@ -364,10 +552,10 @@ for i = 1:2 %1=hbo, 2=hbr
     %%plot the difference between W2U-WU.
     if plotNormalizeDiff%normalized version
         dataToplot = (dataPfcHboVsBaseInOrderShifted(~increaseLogicalPFC,4) - dataPfcHboVsBaseInOrderShifted(~increaseLogicalPFC,3))./abs(dataPfcHboVsBaseInOrderShifted(~increaseLogicalPFC,3)); %normalized
-        ylabel('(unevenABC - uevenABC) / uevenABC');
+        ylabel('(hardDT - easyDT) / easyDT');
     else
         dataToplot = dataPfcHboVsBaseInOrderShifted(~increaseLogicalPFC,4) - dataPfcHboVsBaseInOrderShifted(~increaseLogicalPFC,3);
-        ylabel('uevenABC - evenABC');
+        ylabel('hardDT - easyDT');
     end
     plot(ones(size(dataToplot)),dataToplot,'o','Color',greyColor, 'LineWidth',2,'MarkerSize',10,'DisplayName','Dec(unexp)');
     xticks([]); grid on; xlabel('Dec(unexp)'); ylim([1.1*min(dataToplot) 0]); %ylim([-4.5 0]);
@@ -380,10 +568,10 @@ for i = 1:2 %1=hbo, 2=hbr
     %%plot the difference between W2U-WU.
     if plotNormalizeDiff%normalized version
         dataToplot = (dataPfcHboVsBaseInOrderShifted(increaseLogicalPFC,4) - dataPfcHboVsBaseInOrderShifted(increaseLogicalPFC,3))./abs(dataPfcHboVsBaseInOrderShifted(increaseLogicalPFC,3));
-        ylabel('(unevenABC - uevenABC) / uevenABC');
+        ylabel('(hardDT - easyDT) / easyDT');
     else
         dataToplot = dataPfcHboVsBaseInOrderShifted(increaseLogicalPFC,4) - dataPfcHboVsBaseInOrderShifted(increaseLogicalPFC,3);
-        ylabel('uevenABC - evenABC');
+        ylabel('hardDT - easyDT');
     end
     plot(ones(size(dataToplot)),dataToplot,'o','Color',blueColor, 'LineWidth',2,'MarkerSize',10,'DisplayName','Inc(exp)')
     xticks([]); grid on; xlabel('Inc(exp)'); ylim([0 1.1*max(dataToplot) ]); %ylim([0 4.5]); 
@@ -408,7 +596,7 @@ for i = 1:2 %1=hbo, 2=hbr
         pfcHboVsBaseScaled = scale .* dataPfcHboVsBaseInOrderShifted;
         increaseRatio = sum((pfcHboVsBaseScaled(:,4) - pfcHboVsBaseScaled(:,3)) >=0) / size(pfcHboVsBaseScaled,1);
 %             outlierCounts = sum(isoutlier(pfcHboVsBaseScaled(:,3:4)));
-        objectiveFcnVal(end+1) = increaseRatio-sum(sum(isoutlier(pfcHboVsBaseScaled(:,3:4),'mean')))/(2*size(pfcHboVsBaseScaled,1));
+        objectiveFcnVal(end+1) = increaseRatio-sum(sum(isoutlier(pfcHboVsBaseScaled(:,3:4))))/(2*size(pfcHboVsBaseScaled,1));
     end
     fObjectiveFcn = figure();hold on;
     plot(scaleRange, objectiveFcnVal,'LineWidth',3);
@@ -531,16 +719,24 @@ for i = 1:2 %1=hbo, 2=hbr
             %3rd column or 5,7, ... if more examples are plotted, 1st row,
             %decrease index (unexpected)
             subplot(totalRow,totalSubPltCol,2+scaleIdx*2-1); axis square; hold on; 
-            plot(pfcHboVsBaseScaled((~increaseLogical)&(~refLogical),3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', greyColor);%decrease in pfc then at index (grey)
-            plot(pfcHboVsBaseScaled((~increaseLogical)&(refLogical),3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', blueColor);%increase in pfc (blue), now decrease at index
+            if any((~increaseLogical)&(~refLogical))
+                plot(pfcHboVsBaseScaled((~increaseLogical)&(~refLogical),3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', greyColor);%decrease in pfc then at index (grey)
+            end
+            if any((~increaseLogical)&(refLogical))
+                plot(pfcHboVsBaseScaled((~increaseLogical)&(refLogical),3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', blueColor);%increase in pfc (blue), now decrease at index
+            end
             ylim([0 max(pfcHboVsBaseScaled,[],'all')+1]);
-            ylabel('Automaticity Index'); xticks([1 2]);xticklabels({'evenABC','unevenABC'});          
-            title(sprintf('evenABC -> unevenABC ScaledX%.1f\nDecrease (unexpected): %.2f', scaleFactor, 1-increaseRatioScaled));
+            ylabel('Automaticity Index'); xticks([1 2]);xticklabels(sortedDtNames);          
+            title(sprintf('easyDT -> hardDT ScaledX%.1f\nDecrease (unexpected): %.2f', scaleFactor, 1-increaseRatioScaled));
             
             %3rd (or other odd columns) 2nd row (increase index, expected)
             subplot(totalRow,totalSubPltCol,totalSubPltCol+2+scaleIdx*2-1); axis square; hold on;      
-            plot(pfcHboVsBaseScaled(increaseLogical & refLogical,3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', blueColor);%>= in PFC (blue), then increase or non change group in index (blue)
-            plot(pfcHboVsBaseScaled(increaseLogical & (~refLogical),3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', greyColor);%< in PFC (grey), now increase or non change group (blue)
+            if any(increaseLogical & refLogical)
+                plot(pfcHboVsBaseScaled(increaseLogical & refLogical,3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', blueColor);%>= in PFC (blue), then increase or non change group in index (blue)
+            end
+            if any(increaseLogical & (~refLogical))
+                plot(pfcHboVsBaseScaled(increaseLogical & (~refLogical),3:4)','o-','LineWidth',1.5,'MarkerSize',5,'Color', greyColor);%< in PFC (grey), now increase or non change group (blue)
+            end
             ylim([0 max(pfcHboVsBaseScaled,[],'all')+1])
 
             %Plot individual colors
@@ -550,8 +746,8 @@ for i = 1:2 %1=hbo, 2=hbr
             ylabel('Automaticity Index')
             xticks([1:2]);
     %         xlim([1 2])
-            xticklabels({'evenABC','unevenABC'});
-            title(sprintf('evenABC -> unevenABC ScaledX%.1f\nIncrease (expected): %.2f', scaleFactor, increaseRatioScaled));
+            xticklabels(sortedDtNames);
+            title(sprintf('easyDT -> hardDT ScaledX%.1f\nIncrease (expected): %.2f', scaleFactor, increaseRatioScaled));
 
             sgtitle([titleStr 'VsRest ComparedTo ' displaySuffix])
               
@@ -571,17 +767,20 @@ for i = 1:2 %1=hbo, 2=hbr
             %plot the difference (W2U - WU) as scatter points only
             if plotNormalizeDiff%normalized version
                 indexDiffVal = (pfcHboVsBaseScaled(:,4) - pfcHboVsBaseScaled(:,3))./pfcHboVsBaseScaled(:,3);
-                ylabel('(unevenABC - uevenABC) / uevenABC');
+                ylabel('(hardDT - easyDT) / easyDT');
             else
                 indexDiffVal = (pfcHboVsBaseScaled(:,4) - pfcHboVsBaseScaled(:,3));
-                ylabel('uevenABC - evenABC');       
+                ylabel('hardDT - easyDT');       
             end
             dataToplot = indexDiffVal((~increaseLogical)&(~refLogical)); %decreaser with unexpected perf (inc) or pfc (decrease) (grey)
             plot(ones(size(dataToplot)),dataToplot,'o','Color',greyColor, 'LineWidth',2,'MarkerSize',10,'DisplayName',['Unexpected ' displaySuffix]); 
             dataToplot = indexDiffVal((~increaseLogical)&refLogical); %decreaser with expected perf (decrease) or pfc (increase) (blue)
             plot(ones(size(dataToplot))+0.5,dataToplot,'o','Color',blueColor, 'LineWidth',2,'MarkerSize',10,'DisplayName',['Expected '  displaySuffix]); 
             xlim([0.5,2]);grid on; xticks({}); %xticks([1 1.5]); xticklabels({['Unexpected' displaySuffix],['Expected' displaySuffix]});
-            ylim([min(indexDiffVal,[],'all')*1.1 0]);legend(); %legend('location','northeastoutside'); 
+            if min(indexDiffVal,[],'all')*1.1 < 0 %only set lim if there is data to set
+                ylim([min(indexDiffVal,[],'all')*1.1 0]);
+            end
+            legend(); %legend('location','northeastoutside'); 
             title('Amount of decrease');
             
             %odd #columns (start from 4th) 2nd row, decreaser diff
@@ -595,7 +794,10 @@ for i = 1:2 %1=hbo, 2=hbr
             dataToplot = indexDiffVal(increaseLogical&refLogical); %increaser with expected perf (dec) or pfc (increase) (blue)
             plot(ones(size(dataToplot))+0.5,dataToplot,'o','Color',blueColor, 'LineWidth',2,'MarkerSize',10,'DisplayName',['Expected '  displaySuffix]); 
             xlim([0.5,2]); grid on; xticks({});%xticks([1 1.5]); xticklabels({['Unexpected' displaySuffix],['Expected' displaySuffix]});
-            ylim([0 max(indexDiffVal,[],'all')*1.1]); legend(); %legend('location','northeastoutside'); 
+            if max(indexDiffVal,[],'all')*1.1 > 0%only set lim if there is data to set
+                ylim([0 max(indexDiffVal,[],'all')*1.1]); 
+            end
+            legend(); %legend('location','northeastoutside');
             title('Amount of increase');
         end
         
@@ -605,7 +807,7 @@ for i = 1:2 %1=hbo, 2=hbr
         scaledData{1,(scaleIdx - 1)*2 + i} = [titleStr ' vs Rest Scaled by Gait and Cog x' num2str(scaleFactor)];
         scaledData{2,(scaleIdx - 1)*2 + i} = pfcHboVsBaseScaled;
         %save data  column order (i.e., order of the task)
-        scaledData{3,(scaleIdx - 1)*2 + i} = {'Wk','S2','W2','W2Uneven'};
+        scaledData{3,(scaleIdx - 1)*2 + i} = {'Wk (Hbo or Hbr Shifted)','S2 (Hbo or Hbr Shifted)',[sortedDtNames{1} ' (Scaled = AGI)'],[sortedDtNames{2} ' (Scaled = AGI)']};
         scaleIdx = scaleIdx + 1;
     end
     set(findall(gcf,'-property','FontSize'),'FontSize',20)
@@ -684,7 +886,7 @@ for i = 1:2 %1=hbo, 2=hbr
             end
             xticks([1:size(deltaPerf,2)])
 %             xticklabels({'Wk','S2','W2','W2U'})
-            xticklabels({'W2','W2Uneven'});
+            xticklabels(sortedDtNames);
             ylabel('Combined \delta Performance')
             title('Combined \delta Performance')
 
@@ -700,7 +902,7 @@ for i = 1:2 %1=hbo, 2=hbr
             ylabel([titleStr ' vs Rest (Shifted>0=)'])
             xticks([1:size(deltaPerf,2)])
 %             xticklabels({'Walk','S2','W2','W2U'})
-            xticklabels({'W2','W2Uneven'});
+            xticklabels(sortedDtNames);
             title('Raw PFC');
 
             subplot(3,4,3:4); hold on;
@@ -713,7 +915,7 @@ for i = 1:2 %1=hbo, 2=hbr
             ylabel(['Scaled ',titleStr,' vs Rest'])
             xticks([1:size(deltaPerf,2)])
 %             xticklabels({'Walk','S2','W2','W2Uneven'})
-            xticklabels({'W2','W2Uneven'});
+            xticklabels(sortedDtNames);
         
             subplot(3,4,5:6); hold on; %gait only
             if subGroup == 1
@@ -725,7 +927,7 @@ for i = 1:2 %1=hbo, 2=hbr
             end
             title(sprintf('Gait Performance.'));
             xticks([1:3]);
-            xticklabels({'Walk','W2','W2Uneven'});
+            xticklabels([{'Walk'},sortedDtNames]);
             %should decrease or unchange
 %             xticklabels({'W2','W2Uneven'});
             ylabel('Gait Speed (m/s)')
@@ -740,7 +942,7 @@ for i = 1:2 %1=hbo, 2=hbr
             end
             title(sprintf('Alphabet Performance'));
             xticks([1:3]);
-            xticklabels({'S2','W2','W2Uneven'});
+            xticklabels([{'S2'},sortedDtNames]);
 %             xticklabels({'W2','W2Uneven'});
             ylabel('Correct Letter / s)');   
                         
@@ -764,7 +966,7 @@ for i = 1:2 %1=hbo, 2=hbr
             scatter(subGroup*ones(size(diffData))-0.2,diffData,65,'k','filled','HandleVisibility','off')
             xticks([1:2]);
             xticklabels({'Inc','NonInc'});
-            title('W2U-W2');
+            title('hardDT-easyDT');
             if subGroup == 2
                 legend({sprintf('Inc SlowDown: %.2f',decreaseRatio_gait1),sprintf('NonInc SlowDown: %.2f',decreaseRatio_gait2),'SE'},'NumColumns',2)
             end
@@ -777,7 +979,7 @@ for i = 1:2 %1=hbo, 2=hbr
             end
             title('(DT - GaitBase) / Base');
             xticks([1:3]);
-            xticklabels({'Wk','W2','W2Uneven'});
+            xticklabels([{'Wk'},sortedDtNames]);
 %             xticklabels({'W2','W2Uneven'});
             ylabel('\delta Gait%');
                             
@@ -803,7 +1005,7 @@ for i = 1:2 %1=hbo, 2=hbr
             scatter(subGroup*ones(size(diffData))-0.2,diffData,65,'k','filled','HandleVisibility','off')
             xticks([1:2]);
             xticklabels({'Inc','NonInc'});
-            title('W2U-W2');
+            title('hardDT-easyDT');
             if subGroup == 2
                 legend({sprintf('Inc LessAlpha: %.2f',decreaseRatio_alpha1),sprintf('NonInc LessAlpha: %.2f',decreaseRatio_alpha2),'SE'},'NumColumns',2)
             end
@@ -816,7 +1018,7 @@ for i = 1:2 %1=hbo, 2=hbr
             end
             title('(DT - AlphaBase) / Base');
             xticks([1:3]);
-            xticklabels({'S2','W2','W2Uneven'});
+            xticklabels([{'S2'},sortedDtNames]);
 %             xticklabels({'W2','W2Uneven'});
             ylabel('\delta Alpha%');
             
